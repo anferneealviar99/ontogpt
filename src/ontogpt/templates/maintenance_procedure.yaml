@@ -1,0 +1,119 @@
+id: https://w3id.org/maintenance-procedure
+name: maintenance-procedure
+title: Maintenance Procedure 
+description: >-
+  A schema for maintenance procedures
+license: https://creativecommons.org/publicdomain/zero/1.0/
+prefixes:
+  linkml: https://w3id.org/linkml
+  procedure: http//w3id.org/maintenance-procedure
+
+default_prefix: maintenance-procedure
+default_range: string
+
+imports:
+  - linkml:types
+  - core
+
+classes:
+  MaintenanceProcedure:
+    tree_root: true
+    attributes:
+      label: 
+        description: name of the maintenance procedure
+        slot_uri: rdfs:label
+      tools:
+        description: a semicolon separated list of the tools required to perform the procedure
+        multivalued: true
+        range: Tool
+      steps:
+        description: a semicolon separated list of the individual steps involved in the procedure
+        multivalued: true
+        range: Step
+
+  Tool:
+    is_a: CompoundExpression
+    attributes:
+      tool_type:
+        description: the tool type e.g. wrench
+        range: ToolType
+      measurement:
+        description: the measurement of the tool e.g. 19mm
+        range: Measurement
+
+  # for situations where you get something like "19mm socket"
+  Measurement:
+    is_a: CompoundExpression
+    attributes:
+      value:
+        description: the value of the quantity
+      unit:
+        description: unit of meassurement e.g. mm, inch, etc.
+        range: Unit
+        slot_uri: qudt:unit
+        
+  Step:
+    is_a: CompoundExpression
+    attributes:
+      actions:
+        description: the actions taken in the maintenance procedure step
+        range: Action
+        multivalued: true
+      component:
+        description: the component the maintenance process is being performed on
+        range: Component
+        multivalued: true
+      materials:
+        description: the materials being used to complete the maintenance procedure e.g. oil, etc.
+        range: Material
+        multivalued: true
+      tools:
+        description: the tools used to complete the maintenance procedure step e.g. wrench, hammer, etc.
+        range: Tool
+        multivalued: true
+
+  ToolType:
+    is_a: NamedEntity
+    id_prefixes:
+      - wikidata
+    annotations:
+      annotators: "wikidata:"
+
+  Unit:
+    is_a: NamedEntity
+    id_prefixes:
+    annotations:
+      annotators: # don't know what to put here yet
+
+  # the materials being used in the step, e.g. oil
+  Material:
+    is_a: NamedEntity
+    id_prefixes:
+      - wikidata
+    annotations:
+      annotators: "wikidata:"
+
+  Component:
+    is_a: NamedEntity
+    id_prefixes:
+      - wikidata
+    annotations: 
+      annotators: "wikidata:"
+
+  Action:
+    is_a: NamedEntity
+    id_prefixes:
+      - wikidata
+    annotations:
+      annotators: "wikidata:"
+
+  
+
+  
+  
+
+        
+  
+
+
+
