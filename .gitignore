@@ -145,3 +145,5 @@ random
 LOG
 
 .DS_Store
+
+venv-env
