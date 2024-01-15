@@ -4,7 +4,7 @@ import json
 import logging
 import pickle
 import sys
-from copy import copy, deepcopy
+from copy import deepcopy
 from dataclasses import dataclass
 from io import BytesIO, TextIOWrapper
 from pathlib import Path
@@ -27,9 +27,7 @@ from ontogpt.clients import OpenAIClient
 from ontogpt.clients.pubmed_client import PubmedClient
 from ontogpt.clients.soup_client import SoupClient
 from ontogpt.clients.wikipedia_client import WikipediaClient
-from ontogpt.engines import create_engine
 from ontogpt.engines.embedding_similarity_engine import SimilarityEngine
-from ontogpt.engines.enrichment import EnrichmentEngine
 from ontogpt.engines.generic_engine import GenericEngine, QuestionCollection
 from ontogpt.engines.gpt4all_engine import GPT4AllEngine  # type: ignore
 from ontogpt.engines.halo_engine import HALOEngine  # type: ignore
@@ -41,17 +39,10 @@ from ontogpt.engines.pheno_engine import PhenoEngine
 from ontogpt.engines.reasoner_engine import ReasonerEngine
 from ontogpt.engines.spires_engine import SPIRESEngine
 from ontogpt.engines.synonym_engine import SynonymEngine
-from ontogpt.evaluation.enrichment.eval_enrichment import EvalEnrichment
 from ontogpt.evaluation.resolver import create_evaluator
 from ontogpt.io.csv_wrapper import output_parser, write_obj_as_csv
 from ontogpt.io.html_exporter import HTMLExporter
 from ontogpt.io.markdown_exporter import MarkdownExporter
-from ontogpt.utils.gene_set_utils import (
-    GeneSet,
-    _is_human,
-    fill_missing_gene_set_values,
-    parse_gene_set,
-)
 from ontogpt.utils.gpt4all_runner import chain_gpt4all_model, set_up_gpt4all_model
 
 __all__ = [
@@ -277,8 +268,14 @@ def extract(
 
         ontogpt extract -t gocam.GoCamAnnotations -i gocam-27929086.txt
 
-    The input argument must be either a file path or a string.
-    Use the -i/--input-file option followed by the path to the input file if using the former.
+    The input argument may be:
+        A file path,
+        A directory,
+        or a string.
+    Use the -i/--input-file option followed by the path to the input file
+    or directory.
+    If the input is a directory, all files with the .txt extension will be read.
+    This is not recursive.
     Otherwise, the input is assumed to be a string to be read as input.
 
     You can also use fragments of existing schemas, use the --target-class option (-T) to
@@ -298,9 +295,17 @@ def extract(
     model_source = selectmodel["provider"]
     model_name = selectmodel["alternative_names"][0]
 
+    inputlist = []
+
     if not inputfile or inputfile == "-":
         text = sys.stdin.read()
-    if inputfile and Path(inputfile).exists():
+        inputlist.append(text)
+    elif inputfile and Path(inputfile).is_dir():
+        logging.info(f"Input file directory: {inputfile}")
+        inputfiles = Path(inputfile).glob("*.txt")
+        inputlist = [open(f, "r").read() for f in inputfiles if f.is_file()]
+        logging.info(f"Found {len(inputlist)} input files here.")
+    elif inputfile and Path(inputfile).exists():
         logging.info(f"Input file: {inputfile}")
         if use_textract:
             import textract
@@ -309,6 +314,7 @@ def extract(
         else:
             text = open(inputfile, "r").read()
         logging.info(f"Input text: {text}")
+        inputlist.append(text)
     elif inputfile and not Path(inputfile).exists():
         raise FileNotFoundError(f"Cannot find input file {inputfile}")
 
@@ -333,12 +339,20 @@ def extract(
         target_class_def = ke.schemaview.get_class(target_class)
     else:
         target_class_def = None
-    results = ke.extract_from_text(text=text, cls=target_class_def, show_prompt=show_prompt)
-    if set_slot_value:
-        for slot_value in set_slot_value:
-            slot, value = slot_value.split("=")
-            setattr(results.extracted_object, slot, value)
-    write_extraction(results, output, output_format, ke)
+
+    i = 0
+    for input_entry in inputlist:
+        if len(inputlist) > 1:
+            i = i + 1
+            logging.info(f"Now extracting from file {i} of {len(inputlist)}")
+        results = ke.extract_from_text(
+            text=input_entry, cls=target_class_def, show_prompt=show_prompt
+        )
+        if set_slot_value:
+            for slot_value in set_slot_value:
+                slot, value = slot_value.split("=")
+                setattr(results.extracted_object, slot, value)
+        write_extraction(results, output, output_format, ke)
 
 
 @main.command()
@@ -844,184 +858,6 @@ def synonyms(model, term, context, output, output_format, **kwargs):
 @main.command()
 @output_option_txt
 @output_format_options
-@click.option(
-    "--annotation-path",
-    "-A",
-    required=True,
-)
-@click.argument("term")
-def create_gene_set(term, output, output_format, annotation_path, **kwargs):
-    """Create a gene set."""
-    logging.info(f"Creating for {term}")
-    evaluator = EvalEnrichment()
-    evaluator.load_annotations(annotation_path)
-    gene_set = evaluator.create_gene_set_from_term(term)
-    print(yaml.dump(gene_set.dict(), sort_keys=False))
-
-
-@main.command()
-@output_option_txt
-@output_format_options
-@click.option("--fill/--no-fill", default=False)
-@click.option(
-    "--input-file",
-    "-U",
-    help="File with gene IDs to enrich (if not passed as arguments)",
-)
-def convert_geneset(input_file, output, output_format, fill, **kwargs):
-    """Convert gene set to YAML."""
-    gene_set = parse_gene_set(input_file)
-    if fill:
-        fill_missing_gene_set_values(gene_set)
-    output.write(dump_minimal_yaml(gene_set.dict()))
-
-
-@main.command()
-@output_option_txt
-@output_format_options
-@model_option
-@show_prompt_option
-@click.option(
-    "--resolver", "-r", help="OAK selector for the gene ID resolver. E.g. sqlite:obo:hgnc"
-)
-@click.option(
-    "-C",
-    "--context",
-    help="domain e.g. anatomy, industry, health-related (NOT IMPLEMENTED - currently gene only)",
-)
-@click.option(
-    "--strict/--no-strict",
-    default=True,
-    show_default=True,
-    help="If set, there must be a unique mappings from labels to IDs",
-)
-@click.option(
-    "--input-file",
-    "-U",
-    help="File with gene IDs to enrich (if not passed as arguments)",
-)
-@click.option(
-    "--randomize-gene-descriptions-using-file",
-    help="FOR EVALUATION ONLY. Swap out gene descriptions with genes from this gene set filefile",
-)
-@click.option(
-    "--ontological-synopsis/--no-ontological-synopsis",
-    default=True,
-    show_default=True,
-    help="If set, use automated rather than manual gene descriptions",
-)
-@click.option(
-    "--combined-synopsis/--no-combined-synopsis",
-    default=False,
-    show_default=True,
-    help="If set, both gene descriptions",
-)
-@click.option(
-    "--end-marker",
-    help="For testing minor variants of prompts",
-)
-@click.option(
-    "--annotations/--no-annotations",
-    default=True,
-    show_default=True,
-    help="If set, include annotations in the prompt",
-)
-@prompt_template_option
-@interactive_option
-@click.argument("genes", nargs=-1)
-def enrichment(
-    genes,
-    context,
-    input_file,
-    resolver,
-    output,
-    model,
-    show_prompt,
-    interactive,
-    end_marker,
-    output_format,
-    randomize_gene_descriptions_using_file,
-    **kwargs,
-):
-    """Gene class summary enriching (SPINDOCTOR).
-
-    Algorithm:
-
-    1. Map gene symbols to IDs using the resolver (unless IDs specified)
-    2. Fetch gene descriptions using Alliance API
-    3. Create a prompt using descriptions
-
-    Limitations:
-
-    It is very easy to exceed the max token length with GPT-3 models.
-
-    Usage:
-
-        ontogpt enrichment -r sqlite:obo:hgnc -U tests/input/genesets/dopamine.yaml
-
-    Usage:
-
-        ontogpt enrichment -r sqlite:obo:hgnc -U tests/input/genesets/dopamine.yaml
-    """
-    if model:
-        selectmodel = get_model_by_name(model)
-        model_source = selectmodel["provider"]
-
-        if model_source != "OpenAI":
-            raise NotImplementedError(
-                "Model not yet supported for gene enrichment or enrichment evaluation."
-            )
-
-    if not genes and not input_file:
-        raise ValueError("Either genes or input file must be passed")
-    if genes:
-        gene_set = GeneSet(name="TEMP", gene_symbols=genes)
-    if input_file:
-        if genes:
-            raise ValueError("Either genes or input file must be passed")
-        gene_set = parse_gene_set(input_file)
-    if not gene_set:
-        raise ValueError("No genes passed")
-    ke = create_engine(None, EnrichmentEngine, model=model)
-    if end_marker:
-        ke.end_marker = end_marker
-    if interactive:
-        ke.client.interactive = True
-    if settings.cache_db:
-        ke.client.cache_db_path = settings.cache_db
-    if not isinstance(ke, EnrichmentEngine):
-        raise ValueError(f"Expected EnrichmentEngine, got {type(ke)}")
-    if resolver:
-        ke.add_resolver(resolver)
-    if randomize_gene_descriptions_using_file:
-        print("WARNING!! Randomly spiking gene descriptions")
-        spike_gene_set = parse_gene_set(randomize_gene_descriptions_using_file)
-        aliases = {}
-        if not spike_gene_set.gene_symbols:
-            raise ValueError("No gene symbols for spike set")
-        syms = copy(gene_set.gene_symbols)
-        if len(spike_gene_set.gene_symbols) < len(gene_set.gene_symbols):
-            raise ValueError("Not enough genes in spike set")
-        for sym in spike_gene_set.gene_symbols:
-            if not syms:
-                break
-            aliases[sym] = syms.pop()
-        results = ke.summarize(
-            spike_gene_set, normalize=resolver is not None, gene_aliases=aliases, **kwargs
-        )
-    else:
-        results = ke.summarize(gene_set, normalize=resolver is not None, **kwargs)
-    if results.truncation_factor is not None and results.truncation_factor < 1.0:
-        logging.warning(f"Text was truncated; factor = {results.truncation_factor}")
-    output = _as_text_writer(output)
-    if show_prompt:
-        print(results.prompt)
-    output.write(dump_minimal_yaml(results))
-
-
-@main.command()
-@output_option_txt
-@output_format_options
 @model_option
 @click.option(
     "-C",
@@ -1464,7 +1300,7 @@ def eval_enrichment(genes, input_file, number_to_drop, annotations_path, model, 
     default=False,
     show_default=True,
     help="If set, chunk input text, then prepare a separate prompt for each chunk."
-            " Otherwise the full input text is passed.",
+    " Otherwise the full input text is passed.",
 )
 @click.argument("evaluator")
 def eval(evaluator, num_tests, output, chunking, model, **kwargs):
@@ -1477,10 +1313,9 @@ def eval(evaluator, num_tests, output, chunking, model, **kwargs):
     else:
         modelname = DEFAULT_MODEL
 
-    evaluator = create_evaluator(name=evaluator,
-                                 num_tests=num_tests,
-                                 chunking=chunking,
-                                 model=modelname)
+    evaluator = create_evaluator(
+        name=evaluator, num_tests=num_tests, chunking=chunking, model=modelname
+    )
     eos = evaluator.eval()
     output.write(dump_minimal_yaml(eos, minimize=False))
 
